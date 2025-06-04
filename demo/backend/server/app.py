@@ -13,16 +13,19 @@ from app_conf import (
     POSTERS_PREFIX,
     UPLOADS_PATH,
     UPLOADS_PREFIX,
+    APP_ROOT, # Ensure APP_ROOT is imported if used for path construction here
 )
 from data.loader import preload_data
 from data.schema import schema
 from data.store import set_videos
-from flask import Flask, make_response, Request, request, Response, send_from_directory
+from flask import Flask, make_response, Request, request, Response, send_from_directory, jsonify
 from flask_cors import CORS
 from inference.data_types import PropagateDataResponse, PropagateInVideoRequest
 from inference.multipart import MultipartResponseBuilder
 from inference.predictor import InferenceAPI
 from strawberry.flask.views import GraphQLView
+from pathlib import Path
+
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,27 @@ def gen_track_with_mask_stream(
                 },
                 body=chunk.to_json().encode("UTF-8"),
             ).get_message()
+
+
+@app.route("/session/<session_id>/save_last_propagation_masks", methods=["POST"])
+def save_last_propagation_masks_route(session_id: str) -> Response:
+    try:
+        saved_file_path = inference_api.save_masks_from_last_propagation(session_id)
+        return make_response(jsonify({
+            "message": "All masks from the last propagation run saved successfully.",
+            "file_path": saved_file_path
+        }), 200)
+    except ValueError as e: # Specific error for "no data to save" or "session not found" from predictor
+        logger.error(f"Error saving propagation masks for session {session_id}: {e}")
+        if "Cannot find session" in str(e) or "No propagation run data found" in str(e):
+             return make_response(jsonify({"error": str(e)}), 404) # Not Found or Bad Request
+        return make_response(jsonify({"error": str(e)}), 400) # Bad Request for other ValueErrors
+    except RuntimeError as e: # Covers file save failure from predictor
+        logger.error(f"Runtime error saving propagation masks for session {session_id}: {e}")
+        return make_response(jsonify({"error": str(e)}), 500)
+    except Exception as e:
+        logger.error(f"Unexpected error saving propagation masks for session {session_id}: {e}", exc_info=True)
+        return make_response(jsonify({"error": "An unexpected error occurred while saving the propagation masks."}), 500)
 
 
 class MyGraphQLView(GraphQLView):

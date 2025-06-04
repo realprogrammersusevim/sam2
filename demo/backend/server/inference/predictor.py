@@ -91,6 +91,12 @@ class InferenceAPI:
         )
         self.inference_lock = Lock()
 
+        # Directory for saving numpy masks
+        self.saved_masks_dir = Path(APP_ROOT) / "saved_numpy_masks"
+        self.saved_masks_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"NumPy masks will be saved to: {self.saved_masks_dir}")
+
+
     def autocast_context(self):
         if self.device.type == "cuda":
             return torch.autocast("cuda", dtype=torch.bfloat16)
@@ -110,6 +116,8 @@ class InferenceAPI:
             self.session_states[session_id] = {
                 "canceled": False,
                 "state": inference_state,
+                "last_propagation_output": None,  # Stores output of the single last processed frame
+                "full_propagation_results": {}, # Stores all frames from the last propagate_in_video run
             }
             return StartSessionResponse(session_id=session_id)
 
@@ -142,6 +150,12 @@ class InferenceAPI:
             )
 
             masks_binary = (masks > self.score_thresh)[:, 0].cpu().numpy()
+            
+            session["last_propagation_output"] = {
+                "frame_index": frame_idx,
+                "object_ids": object_ids,
+                "masks_binary": masks_binary,
+            }
 
             rle_mask_list = self.__get_rle_mask_list(
                 object_ids=object_ids, masks=masks_binary
@@ -183,6 +197,12 @@ class InferenceAPI:
             )
             masks_binary = (video_res_masks > self.score_thresh)[:, 0].cpu().numpy()
 
+            session["last_propagation_output"] = {
+                "frame_index": frame_idx,
+                "object_ids": obj_ids,
+                "masks_binary": masks_binary,
+            }
+
             rle_mask_list = self.__get_rle_mask_list(
                 object_ids=obj_ids, masks=masks_binary
             )
@@ -215,6 +235,12 @@ class InferenceAPI:
             )
             masks_binary = (video_res_masks > self.score_thresh)[:, 0].cpu().numpy()
 
+            session["last_propagation_output"] = {
+                "frame_index": frame_idx,
+                "object_ids": obj_ids,
+                "masks_binary": masks_binary,
+            }
+            
             rle_mask_list = self.__get_rle_mask_list(
                 object_ids=obj_ids, masks=masks_binary
             )
@@ -236,6 +262,8 @@ class InferenceAPI:
             session = self.__get_session(session_id)
             inference_state = session["state"]
             self.predictor.reset_state(inference_state)
+            session["last_propagation_output"] = None
+            session["full_propagation_results"] = {} # Clear full propagation results
             return ClearPointsInVideoResponse(success=True)
 
     def remove_object(self, request: RemoveObjectRequest) -> RemoveObjectResponse:
@@ -253,10 +281,20 @@ class InferenceAPI:
             )
 
             results = []
+            last_output = session.get("last_propagation_output")
+
             for frame_index, video_res_masks in updated_frames:
                 masks = (video_res_masks > self.score_thresh)[:, 0].cpu().numpy()
+                if last_output and last_output["frame_index"] == frame_index:
+                    session["last_propagation_output"] = {
+                        "frame_index": frame_index,
+                        "object_ids": new_obj_ids, # Should be new_obj_ids specific to this frame if they change
+                        "masks_binary": masks,
+                    }
+                # Note: remove_object does not currently update full_propagation_results.
+                # If this behavior is desired, similar logic to propagate_in_video would be needed here.
                 rle_mask_list = self.__get_rle_mask_list(
-                    object_ids=new_obj_ids, masks=masks
+                    object_ids=new_obj_ids, masks=masks # Assuming new_obj_ids applies to all updated_frames
                 )
                 results.append(
                     PropagateDataResponse(
@@ -264,7 +302,7 @@ class InferenceAPI:
                         results=rle_mask_list,
                     )
                 )
-
+            
             return RemoveObjectResponse(results=results)
 
     def propagate_in_video(
@@ -275,13 +313,6 @@ class InferenceAPI:
         propagation_direction = "both"
         max_frame_num_to_track = None
 
-        """
-        Propagate existing input points in all frames to track the object across video.
-        """
-
-        # Note that as this method is a generator, we also need to use autocast_context
-        # in caller to this method to ensure that it's called under the correct context
-        # (we've added `autocast_context` to `gen_track_with_mask_stream` in app.py).
         with self.autocast_context(), self.inference_lock:
             logger.info(
                 f"propagate in video in session {session_id}: "
@@ -291,6 +322,7 @@ class InferenceAPI:
             try:
                 session = self.__get_session(session_id)
                 session["canceled"] = False
+                session["full_propagation_results"] = {} # Clear previous full propagation results
 
                 inference_state = session["state"]
                 if propagation_direction not in ["both", "forward", "backward"]:
@@ -313,6 +345,14 @@ class InferenceAPI:
                         masks_binary = (
                             (video_res_masks > self.score_thresh)[:, 0].cpu().numpy()
                         )
+                        
+                        current_frame_output = {
+                            "frame_index": frame_idx,
+                            "object_ids": obj_ids,
+                            "masks_binary": masks_binary,
+                        }
+                        session["last_propagation_output"] = current_frame_output
+                        session["full_propagation_results"][frame_idx] = current_frame_output
 
                         rle_mask_list = self.__get_rle_mask_list(
                             object_ids=obj_ids, masks=masks_binary
@@ -339,6 +379,17 @@ class InferenceAPI:
                             (video_res_masks > self.score_thresh)[:, 0].cpu().numpy()
                         )
 
+                        current_frame_output = {
+                            "frame_index": frame_idx,
+                            "object_ids": obj_ids,
+                            "masks_binary": masks_binary,
+                        }
+                        session["last_propagation_output"] = current_frame_output
+                        # Overwrite if frame_idx was already processed in forward pass,
+                        # backward pass result is usually preferred.
+                        session["full_propagation_results"][frame_idx] = current_frame_output
+
+
                         rle_mask_list = self.__get_rle_mask_list(
                             object_ids=obj_ids, masks=masks_binary
                         )
@@ -348,8 +399,6 @@ class InferenceAPI:
                             results=rle_mask_list,
                         )
             finally:
-                # Log upon completion (so that e.g. we can see if two propagations happen in parallel).
-                # Using `finally` here to log even when the tracking is aborted with GeneratorExit.
                 logger.info(
                     f"propagation ended in session {session_id}; {self.__get_session_stats()}"
                 )
@@ -360,6 +409,44 @@ class InferenceAPI:
         session = self.__get_session(request.session_id)
         session["canceled"] = True
         return CancelPorpagateResponse(success=True)
+
+    def save_masks_from_last_propagation(self, session_id: str) -> str:
+        """
+        Saves all inferred NumPy mask arrays from the last 'propagate_in_video' run
+        for the given session to a compressed .npz file.
+        Each frame's masks and object IDs are stored.
+        """
+        with self.inference_lock: # Ensure thread-safety when accessing session state
+            session = self.__get_session(session_id)
+            full_results = session.get("full_propagation_results")
+
+            if not full_results: # Checks if None or empty
+                raise ValueError(f"No propagation run data found to save for session {session_id}. Please run propagation first.")
+
+            save_dict = {}
+            all_object_ids_set = set()
+            for frame_idx, data in full_results.items():
+                save_dict[f"frame_{frame_idx}_masks"] = data["masks_binary"]
+                # Ensure object_ids are stored as a NumPy array for consistency in npz
+                obj_ids_array = np.array(data["object_ids"], dtype=np.int32)
+                save_dict[f"frame_{frame_idx}_object_ids"] = obj_ids_array
+                all_object_ids_set.update(data["object_ids"])
+            
+            if all_object_ids_set:
+                save_dict["all_object_ids"] = np.array(sorted(list(all_object_ids_set)), dtype=np.int32)
+
+
+            filename = f"session_{session_id}_propagation_masks.npz"
+            file_path = self.saved_masks_dir / filename
+
+            try:
+                np.savez_compressed(file_path, **save_dict)
+                logger.info(f"Saved all masks from last propagation for session {session_id} to {file_path}")
+                return str(file_path.resolve())
+            except Exception as e:
+                logger.error(f"Failed to save propagation masks to {file_path} for session {session_id}: {e}")
+                raise RuntimeError(f"Failed to save propagation masks file: {e}")
+
 
     def __get_rle_mask_list(
         self, object_ids: List[int], masks: np.ndarray
@@ -398,7 +485,6 @@ class InferenceAPI:
 
     def __get_session_stats(self):
         """Get a statistics string for live sessions and their GPU usage."""
-        # print both the session ids and their video frame numbers
         live_session_strs = [
             f"'{session_id}' ({session['state']['num_frames']} frames, "
             f"{len(session['state']['obj_ids'])} objects)"

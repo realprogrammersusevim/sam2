@@ -12,3 +12,5 @@ demo/backend/checkpoints/*.pt
 .aider*
 data
 *.mp4
+saved_numpy_masks
+*.stl

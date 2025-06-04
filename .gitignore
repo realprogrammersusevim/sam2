@@ -10,3 +10,5 @@ outputs/*
 checkpoints/*.pt
 demo/backend/checkpoints/*.pt
 .aider*
+data
+*.mp4

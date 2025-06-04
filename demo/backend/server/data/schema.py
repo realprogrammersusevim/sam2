@@ -56,7 +56,6 @@ from strawberry.file_uploads import Upload
 
 @strawberry.type
 class Query:
-
     @strawberry.field
     def default_video(self) -> Video:
         """
@@ -90,7 +89,6 @@ class Query:
 
 @strawberry.type
 class Mutation:
-
     @strawberry.mutation
     def upload_video(
         self,
@@ -132,6 +130,8 @@ class Mutation:
 
         response = inference_api.start_session(request=request)
 
+        print(f"Start Session: {response.session_id}")
+
         return StartSession(session_id=response.session_id)
 
     @strawberry.mutation
@@ -139,6 +139,12 @@ class Mutation:
         self, input: CloseSessionInput, info: strawberry.Info
     ) -> CloseSession:
         inference_api: InferenceAPI = info.context["inference_api"]
+
+        inference_api.save_masks_from_last_propagation(
+            input.session_id
+        )  # TODO: Fix this awful hack
+
+        print(f"Closing Session: {input.session_id}")
 
         request = CloseSessionRequest(
             type="close_session",

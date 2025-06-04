@@ -14,10 +14,8 @@
  * limitations under the License.
  */
 import MoreOptionsToolbarBottomActions from '@/common/components/options/MoreOptionsToolbarBottomActions';
-import SaveLastMaskButton from '@/common/components/options/SaveLastMaskButton';
 import ShareSection from '@/common/components/options/ShareSection';
 import TryAnotherVideoSection from '@/common/components/options/TryAnotherVideoSection';
-import ToolbarSection from '@/common/components/toolbar/ToolbarSection';
 import useMessagesSnackbar from '@/common/components/snackbar/useDemoMessagesSnackbar';
 import ToolbarHeaderWrapper from '@/common/components/toolbar/ToolbarHeaderWrapper';
 import useScreenSize from '@/common/screen/useScreenSize';
@@ -49,9 +47,6 @@ export default function MoreOptionsToolbar({onTabChange}: Props) {
         />
         <ShareSection />
         {!isMobile && <div className="h-[1px] bg-black mt-4 mb-8"></div>}
-        <ToolbarSection title="Actions">
-          <SaveLastMaskButton />
-        </ToolbarSection>
         <TryAnotherVideoSection onTabChange={onTabChange} />
       </div>
       {!isMobile && (
